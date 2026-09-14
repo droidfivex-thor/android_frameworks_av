@@ -83,6 +83,7 @@
 
 #include "CameraService.h"
 #include "api1/Camera2Client.h"
+#include "api1/CameraClient.h"
 #include "api2/CameraDeviceClient.h"
 #include "utils/CameraServiceProxyWrapper.h"
 #include "utils/CameraTraces.h"
@@ -1564,6 +1565,23 @@ Status CameraService::makeClient(
     }
     if (effectiveApiLevel == API_1) { // Camera1 API route
         sp<ICameraClient> tmp = static_cast<ICameraClient*>(cameraCb.get());
+
+        // Opt-in: serve API1 from the HALv1 device of providers implementing openLegacy(),
+        // whose vendor Camera1 parameters can offer modes the HALv3 path does not.
+        if (property_get_bool("persist.camera.hal1.api1", false) &&
+                cameraService->mCameraProviderManager != nullptr &&
+                cameraService->mCameraProviderManager->hasHal1Device(cameraId)) {
+            ALOGI("%s: Camera %s: using the HALv1 client for the API1 route",
+                    __FUNCTION__, cameraId.c_str());
+            *client = new CameraClient(cameraService, tmp,
+                                       cameraService->mCameraServiceProxyWrapper,
+                                       cameraService->mAttributionAndPermissionUtils,
+                                       clientAttribution, callingPid, cameraId, api1CameraId,
+                                       facing, sensorOrientation, servicePid, compatInfo,
+                                       /*sharedMode*/false);
+            return Status::ok();
+        }
+
         *client = new Camera2Client(cameraService, tmp, cameraService->mCameraServiceProxyWrapper,
                                     cameraService->mAttributionAndPermissionUtils,
                                     clientAttribution, callingPid, cameraId, api1CameraId, facing,

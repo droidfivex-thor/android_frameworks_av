@@ -41,6 +41,7 @@
 #include <android/hardware/camera/provider/2.6/ICameraProvider.h>
 #include <android/hardware/camera/provider/2.7/ICameraProvider.h>
 #include <android/hardware/camera/device/3.7/types.h>
+#include <android/hardware/camera/device/1.0/ICameraDevice.h>
 #include <android/hidl/manager/1.0/IServiceNotification.h>
 #include <binder/IServiceManager.h>
 #include <camera/VendorTagDescriptor.h>
@@ -427,6 +428,15 @@ public:
             const sp<hardware::camera::device::V3_2::ICameraDeviceCallback>& callback,
             /*out*/
             sp<hardware::camera::device::V3_2::ICameraDeviceSession> *session);
+
+    // Whether a provider implementing openLegacy() publishes a HALv1 device for this id.
+    bool hasHal1Device(const std::string& id) const;
+
+    // For HALv1 the device interface itself acts as the session.
+    status_t openHidlSession1(const std::string &id,
+            const sp<hardware::camera::device::V1_0::ICameraDeviceCallback>& callback,
+            /*out*/
+            sp<hardware::camera::device::V1_0::ICameraDevice> *session);
 
     /**
      * Notify that the camera or torch is no longer being used by a camera client
@@ -922,6 +932,9 @@ private:
     // and the calling code doesn't mutate the list of providers or their lists of devices.
     // No guarantees on the order of traversal
     ProviderInfo::DeviceInfo* findDeviceInfoLocked(const std::string& id) const;
+
+    // Same, for the HALv1 devices that findDeviceInfoLocked() filters out by version.
+    ProviderInfo::DeviceInfo* findDeviceInfo1Locked(const std::string& id) const;
 
     bool isCompositeJpegRDisabledLocked(const std::string &id) const;
     bool isCompositeHeicDisabledLocked(const std::string &id) const;

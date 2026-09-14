@@ -918,6 +918,54 @@ status_t CameraProviderManager::openHidlSession(const std::string &id,
     return HidlProviderInfo::mapToStatusT(status);
 }
 
+bool CameraProviderManager::hasHal1Device(const std::string& id) const {
+    std::lock_guard<std::mutex> lock(mInterfaceMutex);
+    return findDeviceInfo1Locked(id) != nullptr;
+}
+
+status_t CameraProviderManager::openHidlSession1(const std::string &id,
+        const sp<device::V1_0::ICameraDeviceCallback>& callback,
+        /*out*/
+        sp<device::V1_0::ICameraDevice> *session) {
+
+    std::lock_guard<std::mutex> lock(mInterfaceMutex);
+
+    auto deviceInfo = findDeviceInfo1Locked(id);
+    if (deviceInfo == nullptr) return NAME_NOT_FOUND;
+
+    auto *hidlDeviceInfo1 = static_cast<HidlProviderInfo::HidlDeviceInfo1*>(deviceInfo);
+    sp<ProviderInfo> parentProvider = deviceInfo->mParentProvider.promote();
+    if (parentProvider == nullptr) {
+        return DEAD_OBJECT;
+    }
+    const sp<provider::V2_4::ICameraProvider> provider =
+            static_cast<HidlProviderInfo *>(parentProvider.get())->startProviderInterface();
+    if (provider == nullptr) {
+        return DEAD_OBJECT;
+    }
+    std::shared_ptr<HalCameraProvider> halCameraProvider =
+            std::make_shared<HidlHalCameraProvider>(provider, provider->descriptor);
+    saveRef(DeviceMode::CAMERA, id, halCameraProvider);
+
+    auto interface = hidlDeviceInfo1->startDeviceInterface();
+    if (interface == nullptr) {
+        removeRef(DeviceMode::CAMERA, id);
+        return DEAD_OBJECT;
+    }
+
+    hardware::Return<Status> status = interface->open(callback);
+    if (!status.isOk()) {
+        removeRef(DeviceMode::CAMERA, id);
+        ALOGE("%s: Transaction error opening a session for camera device %s: %s",
+                __FUNCTION__, id.c_str(), status.description().c_str());
+        return DEAD_OBJECT;
+    }
+    if (status == Status::OK) {
+        *session = interface;
+    }
+    return HidlProviderInfo::mapToStatusT(status);
+}
+
 void CameraProviderManager::saveRef(DeviceMode usageType, const std::string &cameraId,
         std::shared_ptr<HalCameraProvider> provider) {
     if (!kEnableLazyHal) {
@@ -1073,6 +1121,19 @@ CameraProviderManager::ProviderInfo::DeviceInfo* CameraProviderManager::findDevi
         for (auto& deviceInfo : provider->mDevices) {
             if (deviceInfo->mId == id &&
                     minVersion <= deviceInfo->mVersion && maxVersion >= deviceInfo->mVersion) {
+                return deviceInfo.get();
+            }
+        }
+    }
+    return nullptr;
+}
+
+CameraProviderManager::ProviderInfo::DeviceInfo* CameraProviderManager::findDeviceInfo1Locked(
+        const std::string& id) const {
+    for (auto& provider : mProviders) {
+        if (provider->getIPCTransport() != IPCTransport::HIDL) continue;
+        for (auto& deviceInfo : provider->mDevices) {
+            if (deviceInfo->mId == id && deviceInfo->mVersion.get_major() == 1) {
                 return deviceInfo.get();
             }
         }
@@ -2684,6 +2745,7 @@ status_t CameraProviderManager::ProviderInfo::addDevice(
     switch (transport) {
         case IPCTransport::HIDL:
             switch (major) {
+                case 1:
                 case 3:
                     break;
                 default:

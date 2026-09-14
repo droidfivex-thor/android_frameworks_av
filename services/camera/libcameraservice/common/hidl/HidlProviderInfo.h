@@ -69,6 +69,10 @@ struct HidlProviderInfo : public CameraProviderManager::ProviderInfo,
     sp<hardware::camera::device::V3_2::ICameraDevice>
             startDeviceInterface(const std::string &deviceName);
 
+    // Same, for the device@1.0 names of providers implementing openLegacy().
+    sp<hardware::camera::device::V1_0::ICameraDevice>
+            startDeviceInterface1(const std::string &deviceName);
+
     // ICameraProviderCallbacks interface - these lock the parent mInterfaceMutex
     hardware::Return<void> cameraDeviceStatusChange(
             const hardware::hidl_string& ,
@@ -110,6 +114,39 @@ struct HidlProviderInfo : public CameraProviderManager::ProviderInfo,
                 bool checkSessionParams, bool *status/*status*/);
 
         sp<hardware::camera::device::V3_2::ICameraDevice> startDeviceInterface();
+    };
+
+    // HALv1-specific camera fields, including the actual device interface
+    struct HidlDeviceInfo1 : public CameraProviderManager::ProviderInfo::DeviceInfo {
+
+        typedef hardware::camera::device::V1_0::ICameraDevice InterfaceT;
+
+        sp<IBase> mSavedInterface = nullptr;
+
+        HidlDeviceInfo1(const std::string& , const metadata_vendor_id_t ,
+                const std::string &, uint16_t ,
+                const CameraResourceCost& ,
+                sp<ProviderInfo> ,
+                const std::vector<std::string>& ,
+                sp<InterfaceT>);
+
+        ~HidlDeviceInfo1() {}
+
+        virtual status_t setTorchMode(bool enabled) override;
+        virtual status_t turnOnTorchWithStrengthLevel(int32_t torchStrength) override;
+        virtual status_t getTorchStrengthLevel(int32_t *torchStrength) override;
+        virtual status_t getCameraInfo(const CameraCompatibilityInfo& compatInfo,
+                int *portraitRotation, hardware::CameraInfo *info) const override;
+        //In case of Device1Info assume that we are always API1 compatible
+        virtual bool isAPI1Compatible() const override { return true; }
+        virtual status_t dumpState(int fd) override;
+        virtual status_t filterSmallJpegSizes() override { return INVALID_OPERATION; }
+
+        sp<InterfaceT> startDeviceInterface();
+
+      private:
+        CameraParameters2 mDefaultParameters;
+        status_t cacheCameraInfo(sp<InterfaceT> interface);
     };
 
  private:

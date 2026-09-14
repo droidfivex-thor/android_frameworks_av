@@ -29,6 +29,7 @@
 #include <utils/Utils.h>
 
 #include <android/hardware/camera/device/3.7/ICameraDevice.h>
+#include <android/hardware/camera/device/1.0/ICameraDevice.h>
 
 namespace {
 const bool kEnableLazyHal(property_get_bool("ro.camera.enableLazyHal", false));
@@ -354,6 +355,33 @@ HidlProviderInfo::startDeviceInterface(const std::string &name) {
     return cameraInterface;
 }
 
+sp<device::V1_0::ICameraDevice>
+HidlProviderInfo::startDeviceInterface1(const std::string &name) {
+    Status status;
+    sp<device::V1_0::ICameraDevice> cameraInterface;
+    hardware::Return<void> ret;
+    const sp<provider::V2_4::ICameraProvider> interface = startProviderInterface();
+    if (interface == nullptr) {
+        return nullptr;
+    }
+    ret = interface->getCameraDeviceInterface_V1_x(name, [&status, &cameraInterface](
+        Status s, sp<device::V1_0::ICameraDevice> interface) {
+                status = s;
+                cameraInterface = interface;
+            });
+    if (!ret.isOk()) {
+        ALOGE("%s: Transaction error trying to obtain interface for camera device %s: %s",
+                __FUNCTION__, name.c_str(), ret.description().c_str());
+        return nullptr;
+    }
+    if (status != Status::OK) {
+        ALOGE("%s: Unable to obtain interface for camera device %s: %s", __FUNCTION__,
+                name.c_str(), statusToString(status));
+        return nullptr;
+    }
+    return cameraInterface;
+}
+
 bool HidlProviderInfo::successfullyStartedProviderInterface() {
     return startProviderInterface() != nullptr;
 }
@@ -464,6 +492,45 @@ std::unique_ptr<CameraProviderManager::ProviderInfo::DeviceInfo>
         const std::string &name, const metadata_vendor_id_t tagId,
         const std::string &id, uint16_t minorVersion) {
     Status status;
+
+    // device@1.0 names (providers implementing openLegacy()) get their own device info type.
+    {
+        uint16_t nameMajor, nameMinor;
+        std::string nameType, nameId;
+        if (parseDeviceName(name, &nameMajor, &nameMinor, &nameType, &nameId) == OK
+                && nameMajor == 1) {
+            auto cameraInterface1 = startDeviceInterface1(name);
+            if (cameraInterface1 == nullptr) return nullptr;
+
+            common::V1_0::CameraResourceCost resourceCost1;
+            cameraInterface1->getResourceCost([&status, &resourceCost1](
+                Status s, common::V1_0::CameraResourceCost cost) {
+                        status = s;
+                        resourceCost1 = cost;
+                    });
+            if (status != Status::OK) {
+                ALOGE("%s: Unable to obtain resource costs for camera device %s: %s",
+                        __FUNCTION__, name.c_str(), statusToString(status));
+                return nullptr;
+            }
+            for (auto& conflictName : resourceCost1.conflictingDevices) {
+                uint16_t major, minor;
+                std::string type, cId;
+                status_t res = parseDeviceName(conflictName, &major, &minor, &type, &cId);
+                if (res != OK) {
+                    ALOGE("%s: Failed to parse conflicting device %s", __FUNCTION__,
+                            conflictName.c_str());
+                    return nullptr;
+                }
+                conflictName = cId;
+            }
+
+            return std::unique_ptr<DeviceInfo>(
+                new HidlDeviceInfo1(name, tagId, id, minorVersion,
+                        HalToFrameworkResourceCost(resourceCost1), this,
+                        mProviderPublicCameraIds, cameraInterface1));
+        }
+    }
 
     auto cameraInterface = startDeviceInterface(name);
     if (cameraInterface == nullptr) return nullptr;
@@ -873,6 +940,162 @@ status_t HidlProviderInfo::HidlDeviceInfo3::dumpState(int fd) {
     const sp<hardware::camera::device::V3_2::ICameraDevice> interface =
             startDeviceInterface();
     if (interface == nullptr) {
+        return DEAD_OBJECT;
+    }
+    auto ret = interface->dumpState(handle);
+    native_handle_delete(handle);
+    if (!ret.isOk()) {
+        return INVALID_OPERATION;
+    }
+    return OK;
+}
+
+HidlProviderInfo::HidlDeviceInfo1::HidlDeviceInfo1(
+        const std::string& name,
+        const metadata_vendor_id_t tagId,
+        const std::string &id, uint16_t minorVersion,
+        const CameraResourceCost& resourceCost,
+        sp<CameraProviderManager::ProviderInfo> parentProvider,
+        const std::vector<std::string>& publicCameraIds,
+        sp<InterfaceT> interface) :
+        DeviceInfo(name, tagId, id, hardware::hidl_version{1, minorVersion},
+                   publicCameraIds, resourceCost, parentProvider) {
+    // Get default parameters and initialize flash unit availability
+    // Requires powering on the camera device
+    hardware::Return<Status> status = interface->open(nullptr);
+    if (!status.isOk()) {
+        ALOGE("%s: Transaction error opening camera device %s: %s", __FUNCTION__,
+                id.c_str(), status.description().c_str());
+        return;
+    }
+    if (status != Status::OK) {
+        ALOGE("%s: Unable to open camera device %s: %s", __FUNCTION__,
+                id.c_str(), statusToString(status));
+        return;
+    }
+
+    hardware::Return<void> ret;
+    ret = interface->getParameters([this](const hardware::hidl_string& parms) {
+                mDefaultParameters.unflatten(String8(parms.c_str()));
+            });
+    if (!ret.isOk()) {
+        ALOGE("%s: Transaction error reading camera device %s parameters: %s", __FUNCTION__,
+                id.c_str(), ret.description().c_str());
+        return;
+    }
+
+    const char *flashMode =
+            mDefaultParameters.get(CameraParameters::KEY_SUPPORTED_FLASH_MODES);
+    if (flashMode && strstr(flashMode, CameraParameters::FLASH_MODE_TORCH)) {
+        mHasFlashUnit = true;
+    }
+
+    status_t res = cacheCameraInfo(interface);
+    if (res != OK) {
+        ALOGE("%s: Could not cache CameraInfo for device %s", __FUNCTION__, id.c_str());
+        return;
+    }
+
+    ret = interface->close();
+    if (!ret.isOk()) {
+        ALOGE("%s: Transaction error closing camera device %s: %s", __FUNCTION__,
+                id.c_str(), ret.description().c_str());
+    }
+
+    if (!kEnableLazyHal) {
+        // Save HAL reference indefinitely
+        mSavedInterface = interface;
+    }
+}
+
+status_t HidlProviderInfo::HidlDeviceInfo1::cacheCameraInfo(sp<InterfaceT> interface) {
+    Status status;
+    device::V1_0::CameraInfo cInfo;
+    hardware::Return<void> ret;
+    ret = interface->getCameraInfo([&status, &cInfo](Status s, device::V1_0::CameraInfo camInfo) {
+                status = s;
+                cInfo = camInfo;
+            });
+    if (!ret.isOk()) {
+        ALOGE("%s: Transaction error reading camera info from device %s: %s",
+                __FUNCTION__, mId.c_str(), ret.description().c_str());
+        return DEAD_OBJECT;
+    }
+    if (status != Status::OK) {
+        return mapToStatusT(status);
+    }
+
+    switch (cInfo.facing) {
+        case device::V1_0::CameraFacing::BACK:
+            mInfo.facing = hardware::CAMERA_FACING_BACK;
+            break;
+        case device::V1_0::CameraFacing::EXTERNAL:
+            // Map external to front for legacy API
+        case device::V1_0::CameraFacing::FRONT:
+            mInfo.facing = hardware::CAMERA_FACING_FRONT;
+            break;
+        default:
+            ALOGW("%s: Device %s: Unknown camera facing: %d", __FUNCTION__, mId.c_str(),
+                    cInfo.facing);
+            mInfo.facing = hardware::CAMERA_FACING_BACK;
+    }
+    mInfo.orientation = cInfo.orientation;
+
+    return OK;
+}
+
+status_t HidlProviderInfo::HidlDeviceInfo1::getCameraInfo(
+        const CameraCompatibilityInfo& /*compatInfo*/, int * /*portraitRotation*/,
+        hardware::CameraInfo *info) const {
+    if (info == nullptr) return BAD_VALUE;
+    *info = mInfo;
+    return OK;
+}
+
+sp<hardware::camera::device::V1_0::ICameraDevice>
+HidlProviderInfo::HidlDeviceInfo1::startDeviceInterface() {
+    Mutex::Autolock l(mDeviceAvailableLock);
+    sp<InterfaceT> device;
+    ATRACE_CALL();
+    if (mSavedInterface == nullptr) {
+        sp<HidlProviderInfo> parentProvider =
+                static_cast<HidlProviderInfo *>(mParentProvider.promote().get());
+        if (parentProvider != nullptr) {
+            device = parentProvider->startDeviceInterface1(mName);
+        }
+    } else {
+        device = (InterfaceT *) mSavedInterface.get();
+    }
+    return device;
+}
+
+status_t HidlProviderInfo::HidlDeviceInfo1::setTorchMode(bool enabled) {
+    using hardware::camera::common::V1_0::TorchMode;
+    const sp<InterfaceT> interface = startDeviceInterface();
+    if (interface == nullptr) {
+        return DEAD_OBJECT;
+    }
+    Status s = interface->setTorchMode(enabled ? TorchMode::ON : TorchMode::OFF);
+    return mapToStatusT(s);
+}
+
+status_t HidlProviderInfo::HidlDeviceInfo1::turnOnTorchWithStrengthLevel(
+        int32_t /*torchStrengthLevel*/) {
+    ALOGE("%s HIDL does not support turning on torch with variable strength", __FUNCTION__);
+    return INVALID_OPERATION;
+}
+
+status_t HidlProviderInfo::HidlDeviceInfo1::getTorchStrengthLevel(int32_t * /*torchStrength*/) {
+    ALOGE("%s HIDL does not support variable torch strength level", __FUNCTION__);
+    return INVALID_OPERATION;
+}
+
+status_t HidlProviderInfo::HidlDeviceInfo1::dumpState(int fd) {
+    native_handle_t* handle = native_handle_create(1, 0);
+    handle->data[0] = fd;
+    const sp<InterfaceT> interface = startDeviceInterface();
+    if (interface == nullptr) {
+        native_handle_delete(handle);
         return DEAD_OBJECT;
     }
     auto ret = interface->dumpState(handle);

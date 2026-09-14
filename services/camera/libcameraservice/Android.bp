@@ -148,6 +148,8 @@ cc_library {
         "config/SharedSessionConfigUtils.cpp",
         "config/SharedSessionConfigReader.cpp",
         "api1/Camera2Client.cpp",
+        "api1/CameraClient.cpp",
+        "device1/CameraHardwareInterface.cpp",
         "api1/client2/Parameters.cpp",
         "api1/client2/FrameProcessor.cpp",
         "api1/client2/StreamingProcessor.cpp",
