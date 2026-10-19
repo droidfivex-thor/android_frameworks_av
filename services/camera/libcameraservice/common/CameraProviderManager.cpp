@@ -800,6 +800,11 @@ status_t CameraProviderManager::openAidlSession(const std::string &id,
     auto deviceInfo = findDeviceInfoLocked(id);
     if (deviceInfo == nullptr) return NAME_NOT_FOUND;
 
+    if (isHidlDevice1Locked(deviceInfo)) {
+        ALOGE("%s: Camera device %s is a HALv1 device without a session interface",
+                __FUNCTION__, id.c_str());
+        return INVALID_OPERATION;
+    }
     auto *aidlDeviceInfo3 = static_cast<AidlProviderInfo::AidlDeviceInfo3*>(deviceInfo);
     sp<ProviderInfo> parentProvider = deviceInfo->mParentProvider.promote();
     if (parentProvider == nullptr) {
@@ -842,6 +847,11 @@ status_t CameraProviderManager::openAidlInjectionSession(const std::string &id,
     auto deviceInfo = findDeviceInfoLocked(id);
     if (deviceInfo == nullptr) return NAME_NOT_FOUND;
 
+    if (isHidlDevice1Locked(deviceInfo)) {
+        ALOGE("%s: Camera device %s is a HALv1 device without a session interface",
+                __FUNCTION__, id.c_str());
+        return INVALID_OPERATION;
+    }
     auto *aidlDeviceInfo3 = static_cast<AidlProviderInfo::AidlDeviceInfo3*>(deviceInfo);
     sp<ProviderInfo> parentProvider = deviceInfo->mParentProvider.promote();
     if (parentProvider == nullptr) {
@@ -881,6 +891,11 @@ status_t CameraProviderManager::openHidlSession(const std::string &id,
     auto deviceInfo = findDeviceInfoLocked(id);
     if (deviceInfo == nullptr) return NAME_NOT_FOUND;
 
+    if (isHidlDevice1Locked(deviceInfo)) {
+        ALOGE("%s: Camera device %s is a HALv1 device without a session interface",
+                __FUNCTION__, id.c_str());
+        return INVALID_OPERATION;
+    }
     auto *hidlDeviceInfo3 = static_cast<HidlProviderInfo::HidlDeviceInfo3*>(deviceInfo);
     sp<ProviderInfo> parentProvider = deviceInfo->mParentProvider.promote();
     if (parentProvider == nullptr) {
@@ -1125,7 +1140,21 @@ CameraProviderManager::ProviderInfo::DeviceInfo* CameraProviderManager::findDevi
             }
         }
     }
-    return nullptr;
+    // A HALv1-only camera (device@1.0 without a device@3.x twin) is still a device:
+    // its info, resource cost and API1 client come from the HALv1 entry.
+    return findDeviceInfo1Locked(id);
+}
+
+bool CameraProviderManager::isHidlDevice1Locked(
+        const ProviderInfo::DeviceInfo* deviceInfo) const {
+    if (deviceInfo == nullptr || deviceInfo->mVersion.get_major() != 1) return false;
+    for (auto& provider : mProviders) {
+        if (provider->getIPCTransport() != IPCTransport::HIDL) continue;
+        for (auto& providerDevice : provider->mDevices) {
+            if (providerDevice.get() == deviceInfo) return true;
+        }
+    }
+    return false;
 }
 
 CameraProviderManager::ProviderInfo::DeviceInfo* CameraProviderManager::findDeviceInfo1Locked(

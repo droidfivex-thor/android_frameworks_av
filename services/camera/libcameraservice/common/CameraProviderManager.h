@@ -935,6 +935,7 @@ private:
 
     // Same, for the HALv1 devices that findDeviceInfoLocked() filters out by version.
     ProviderInfo::DeviceInfo* findDeviceInfo1Locked(const std::string& id) const;
+    bool isHidlDevice1Locked(const ProviderInfo::DeviceInfo* deviceInfo) const;
 
     bool isCompositeJpegRDisabledLocked(const std::string &id) const;
     bool isCompositeHeicDisabledLocked(const std::string &id) const;
