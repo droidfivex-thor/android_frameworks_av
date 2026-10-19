@@ -1537,6 +1537,13 @@ Status CameraService::makeClient(
         int deviceVersion = deviceVersionAndTransport.first;
         switch(deviceVersion) {
             case CAMERA_DEVICE_API_VERSION_1_0:
+                // A HALv1-only device serves API1 through the restored CameraClient below.
+                if (effectiveApiLevel == API_1 &&
+                        property_get_bool("persist.camera.hal1.api1", false) &&
+                        cameraService->mCameraProviderManager != nullptr &&
+                        cameraService->mCameraProviderManager->hasHal1Device(cameraId)) {
+                    break;
+                }
                 ALOGE("Camera using old HAL version: %d", deviceVersion);
                 return STATUS_ERROR_FMT(ERROR_DEPRECATED_HAL,
                         "Camera device \"%s\" HAL version %d no longer supported",
